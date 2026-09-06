@@ -5,17 +5,20 @@ supply only their own tools and tool executors.
 """
 
 from __future__ import annotations
+from assignment import prompts
 
 from copy import deepcopy
 import json
 import logging
 import math
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 from openai import OpenAI
+import yaml
 
 from assignment.env import Environment
 from assignment.agent.tools import INVOKE_SKILL_TOOL
@@ -26,6 +29,13 @@ logger = logging.getLogger(__name__)
 DEFAULT_COMPACTION_KEEP_RECENT_STEPS = 1
 DEFAULT_COMPACTION_MAX_TOKENS = 1_200
 MAX_OBSERVATION_CHARS = 10_000
+
+# A skill file opens with a YAML frontmatter block fenced by `---` lines. The
+# regex only carves out that block; PyYAML parses what is inside it, so a
+# description containing a colon or quotes still reads correctly.
+SKILL_FRONTMATTER_PATTERN = re.compile(
+    r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)", re.DOTALL
+)
 
 # TODO(Part 2): Write instructions that make the model produce concise working
 # memory for a software agent. The prompt should preserve concrete progress,
@@ -132,8 +142,17 @@ class Agent:
 
         # Each agent supplies its own opening messages: the standing
         # instructions, and the task statement that starts the run.
-        self.system_prompt: str = ""
-        self.task_prompt: str = ""
+        self.system_prompt: str = """
+        <system_information>
+        {
+            "machine": <machine>,
+            "release": <release>,
+            "system": <system>,
+            "version": <version>
+        }
+        </system_information>
+        """
+        self.task_prompt: str = "You are a helpful agent. Make sure to obey what the user says and follow directions to the best of your ability."
 
         self.api_prompts: list[list[dict[str, Any]]] = []
         self.api_responses: list[dict[str, Any]] = []
@@ -152,19 +171,101 @@ class Agent:
 
         # TODO(1.1.a): Add machinery to maintain agent state as it takes actions
         # and observes the results.
+        self.working_memory: list[dict[str, Any]] = []
+
 
     def load_skills(self, skills_path: Path) -> dict[str, dict[str, str]]:
-        """Load the skill folders exposed to this agent."""
+        """Load the skill folders exposed to this agent.
 
-        # TODO(1.4): Validate ``skills_path``, discover one ``SKILL.md``
-        # per child directory, parse its YAML frontmatter (what's between the
-        # `---` tags at the head of the file), and return a mapping
-        # keyed by the frontmatter ``name``. Each value must contain a concise
-        # ``metadata`` string for the model's skill catalog and the complete
-        # ``content`` of the skill file for ``invoke_skill``. Reject duplicate
-        # names and malformed or missing frontmatter with a clear
-        # ``ValueError``.
-        raise NotImplementedError
+        ``skills_path`` is a catalog directory whose children are skill
+        directories, each holding a ``SKILL.md``. Returns a mapping keyed by
+        the frontmatter ``name``, where each value carries a one-line
+        ``metadata`` entry for the prompt's skill catalog and the file's whole
+        ``content`` for ``invoke_skill`` to hand back on demand.
+        """
+
+        if not skills_path.exists():
+            raise ValueError(f"Skills path does not exist: {skills_path}")
+        if not skills_path.is_dir():
+            raise ValueError(f"Skills path is not a directory: {skills_path}")
+
+        skills: dict[str, dict[str, str]] = {}
+        # Remember where each name came from so a duplicate can name both
+        # offenders rather than just the second one.
+        sources: dict[str, Path] = {}
+
+        for child in sorted(skills_path.iterdir()):
+            skill_file = child / "SKILL.md"
+            # A child that is not a skill directory is not an error: the
+            # catalog may also hold a README, or a stray __pycache__.
+            if not child.is_dir() or not skill_file.is_file():
+                continue
+
+            content = skill_file.read_text(encoding="utf-8")
+            match = SKILL_FRONTMATTER_PATTERN.match(content)
+            if match is None:
+                raise ValueError(
+                    f"{skill_file} has no YAML frontmatter: the file must open "
+                    "with a `---` line and close the block with another."
+                )
+            try:
+                frontmatter = yaml.safe_load(match.group(1))
+            except yaml.YAMLError as exc:
+                raise ValueError(
+                    f"{skill_file} has malformed YAML frontmatter: {exc}"
+                ) from exc
+            if not isinstance(frontmatter, dict):
+                raise ValueError(
+                    f"{skill_file} frontmatter must be a YAML mapping, got "
+                    f"{type(frontmatter).__name__}."
+                )
+
+            name = frontmatter.get("name")
+            description = frontmatter.get("description")
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError(
+                    f"{skill_file} frontmatter is missing a non-empty `name`."
+                )
+            if not isinstance(description, str) or not description.strip():
+                raise ValueError(
+                    f"{skill_file} frontmatter is missing a non-empty `description`."
+                )
+
+            name = name.strip()
+            if name in skills:
+                raise ValueError(
+                    f"Duplicate skill name {name!r}: defined in both "
+                    f"{sources[name]} and {skill_file}."
+                )
+
+            # The catalog goes in the system prompt, so collapse the
+            # description to a single line and keep the body out of it.
+            summary = " ".join(description.split())
+            skills[name] = {
+                "metadata": f"- {name}: {summary}",
+                "content": content,
+            }
+            sources[name] = skill_file
+
+        return skills
+
+    def skill_catalog_prompt(self) -> str:
+        """Render the loaded skills as a prompt section, or "" when there are none.
+
+        Only each skill's one-line ``metadata`` goes in. The bodies stay out
+        until the model calls ``invoke_skill``, which is what makes the catalog
+        cheap enough to carry on every request.
+        """
+
+        if not self.skills:
+            return ""
+
+        catalog = "\n".join(skill["metadata"] for skill in self.skills.values())
+        return (
+            "\n\nReusable skills are available. Call `invoke_skill` with a "
+            "skill's name to load its instructions, and follow them in place "
+            f"of your default approach.\n\n<skills>\n{catalog}\n</skills>\n"
+        )
 
     def query_language_model(self) -> dict[str, Any]:
         """Send one tool-enabled Chat Completions request and normalize it."""
@@ -227,7 +328,16 @@ class Agent:
 
         # You want to be careful about which attributes of the class you modify
         # here as they may also be handled by the subclasses.
-        raise NotImplementedError
+        # Read, never write: subclasses assign `task_prompt` after
+        # `super().__init__()`, and this runs once per step plus several times
+        # per compaction, so anything appended here would accumulate.
+        prompt: list[dict[str, Any]] = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": self.task_prompt},
+        ]
+        prompt.extend(self.working_memory)
+
+        return prompt
 
     def estimate_active_prompt_tokens(self) -> int:
         """Estimate the next prompt, calibrated by the provider's latest usage."""
@@ -325,13 +435,24 @@ class Agent:
             # step. Ensure you identify when the agent has completed the task
             # by setting `Agent.finished`. If the agent exceeds the
             # `step_limit`, raise `StepLimitError`.
+        
 
             # TODO(2.2) Call `maybe_compact_context()` before each new action
             # request in your shared loop. It already estimates active tokens
             # and handles the threshold, and tracks compaction events for
             # logging.
+            while not self.finished and self.steps_taken < self.step_limit:
+                response = self.query_language_model()
+                self.working_memory.append(response)
 
-            raise NotImplementedError
+                tool_outputs = self.execute_tool_calls(response.get("tool_calls", []))
+                self.working_memory.extend(tool_outputs)
+
+            if not self.finished:
+                raise StepLimitError()
+                
+
+            
         finally:
             # This block is provided infrastructure. Do not modify it: a
             # trajectory is required even when a run fails.
