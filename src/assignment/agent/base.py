@@ -364,7 +364,25 @@ class Agent:
     def process_response(self, response: Any) -> dict[str, Any]:
         """Return relevant parts of the language model's response."""
 
-        return response.choices[0].message.model_dump(exclude_none=True)
+        message = response.choices[0].message.model_dump(exclude_none=True)
+
+        # A reasoning model returns its scratchpad beside the answer. It is not
+        # valid input on the next request, and echoing it back grew to 38% of
+        # the prompt on a chess run, crowding out the board it was reasoning
+        # about. `api_responses` still records the untouched response, so the
+        # trajectory keeps every reasoning token for analysis.
+        message.pop("reasoning_content", None)
+
+        # Providers restart tool-call ids at `call_0` on every response, so a
+        # long transcript accumulates many calls and many results all sharing
+        # one id, with nothing tying a result to the call it answers. Qualify
+        # each id by the step that produced it. The observations built from
+        # these calls copy the id, so both sides stay consistent.
+        for index, call in enumerate(message.get("tool_calls") or []):
+            if isinstance(call, dict):
+                call["id"] = f"{call.get('id') or f'call_{index}'}_s{self.steps_taken}"
+
+        return message
 
     def build_prompt(self) -> list[dict[str, Any]]:
         # TODO(1.1.a): Construct a sequence of messages that form the language
@@ -537,8 +555,24 @@ class Agent:
                 response = self.query_language_model()
                 self.working_memory.append(response)
 
-                tool_outputs = self.execute_tool_calls(response.get("tool_calls", []))
-                self.working_memory.extend(tool_outputs)
+                tool_calls = response.get("tool_calls") or []
+                if tool_calls:
+                    self.working_memory.extend(self.execute_tool_calls(tool_calls))
+                else:
+                    # Nothing ran, so nothing would be appended, and the next
+                    # request would repeat this context almost verbatim -- which
+                    # is how one empty response becomes a run of them. Give the
+                    # model something new to react to instead.
+                    self.working_memory.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "Your last response contained no tool call, so "
+                                "nothing was executed and the state is "
+                                "unchanged. Reply with a tool call."
+                            ),
+                        }
+                    )
 
             if not self.finished:
                 raise StepLimitError()

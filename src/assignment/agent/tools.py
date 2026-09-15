@@ -216,4 +216,41 @@ SIMULATE_MOVE_TOOL: dict = {
 }
 
 # TODO()
-RUN_PYTHON_TOOL: dict = {}
+RUN_PYTHON_TOOL: dict = {
+    "type": "function",
+    "function": {
+        "name": "run_python",
+        "description": (
+            "Run a Python snippet next to the chess server and return what it "
+            "printed.\n"
+            "\n"
+            "`simulate_move(fen, move=None)` and `play_move(move)` are already "
+            "defined in the snippet's namespace as ordinary synchronous "
+            "functions returning dicts. Do not import them, do not define "
+            "them, and do not wrap them in tool-call syntax -- just call "
+            "them. A rejected call raises instead of returning, so a bad move "
+            "surfaces at the line that made it.\n"
+            "\n"
+            "Use this to search properly: loop over candidate moves, score "
+            "them with `simulate_move`, and pick the best. Only what you "
+            "`print()` comes back, so print the result you need to see. "
+            "Calling `play_move` here commits that move to the real game, "
+            "exactly as the `play_move` tool would."
+        ),
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": (
+                        "The Python source to execute. Runs top to bottom in "
+                        "one namespace; the standard library is available."
+                    ),
+                },
+            },
+            "required": ["code"],
+            "additionalProperties": False,
+        },
+    },
+}

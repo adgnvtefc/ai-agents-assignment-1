@@ -182,7 +182,58 @@ def _run_python(env: Any, port: int, arguments: str) -> str:
     #
     # Return <chess_error>{message}</chess_error> if there are issues like type
     # mismatches or parsing failures.
-    raise NotImplementedError
+    try:
+        parsed = json.loads(arguments)
+    except (json.JSONDecodeError, TypeError) as exc:
+        return (
+            f"<chess_error>Could not parse the arguments to `run_python` as "
+            f"JSON: {exc}. Send them again as a valid JSON object."
+            "</chess_error>"
+        )
+
+    if not isinstance(parsed, dict):
+        return (
+            f"<chess_error>The arguments to `run_python` must be a JSON "
+            f"object, got {type(parsed).__name__}.</chess_error>"
+        )
+
+    code = parsed.get("code")
+    if not isinstance(code, str) or not code.strip():
+        return (
+            "<chess_error>`run_python` requires a `code` string holding the "
+            "snippet to run.</chess_error>"
+        )
+
+    # Base64 keeps quoting, newlines, and shell metacharacters in the model's
+    # code from being reinterpreted on the way to the sandbox.
+    encoded = base64.b64encode(code.encode("utf-8")).decode("ascii")
+    try:
+        result = env.execute(
+            ["python", "/opt/assignment/sandbox_python.py", str(port), encoded],
+            shell=False,
+        )
+    except Exception as exc:
+        return (
+            f"<chess_error>Could not run the snippet in the sandbox "
+            f"({type(exc).__name__}: {exc}).</chess_error>"
+        )
+
+    # A non-zero code means the runner itself failed. A snippet that raised is
+    # still a successful run: its exception is reported in the JSON `error`.
+    if result.get("returncode") != 0:
+        detail = (
+            result.get("exception_info")
+            or result.get("stderr")
+            or result.get("output")
+            or "no output"
+        )
+        return (
+            f"<chess_error>The sandbox runner failed "
+            f"(exit {result.get('returncode')}): {detail}</chess_error>"
+        )
+
+    # The runner writes its JSON object, and only that, to the real stdout.
+    return result.get("stdout") or result.get("output") or ""
 
 
 def _invoke_skill(skills: dict[str, dict[str, str]], arguments: str) -> str:
