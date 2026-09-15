@@ -201,6 +201,58 @@ class ChessAgent(Agent):
                 )
                 continue
 
+            if name == "invoke_skill":
+                # Loading instructions is not a move: it leaves the board, the
+                # turn, and the one-move budget exactly as they were.
+                observations.append(
+                    self.tool_message(
+                        call_id,
+                        _invoke_skill(self.skills, function.get("arguments") or ""),
+                    )
+                )
+                continue
+
+            if name == "run_python":
+                result = _run_python(
+                    self.env,
+                    self.python_sandbox_port,
+                    function.get("arguments") or "",
+                )
+                if result.startswith("<chess_error>"):
+                    observations.append(self.tool_message(call_id, result))
+                    continue
+
+                # The snippet may have called `play_move` itself, committing a
+                # move this dispatcher never saw. Re-read the live board so the
+                # model is shown what actually happened rather than the
+                # position it started the snippet from.
+                try:
+                    state = _game_state(self.chess_client)
+                except Exception as exc:
+                    observations.append(
+                        self.tool_message(
+                            call_id,
+                            f"{result}\n<chess_error>The snippet ran but the "
+                            f"board could not be re-read ({type(exc).__name__}: "
+                            f"{exc}). Read the state before moving again."
+                            "</chess_error>",
+                        )
+                    )
+                    continue
+
+                # Only a changed position means a move was committed; a snippet
+                # that merely simulated leaves the turn's move still available.
+                if state.get("fen") != (self.last_state or {}).get("fen"):
+                    move_played = True
+                self.last_state = state
+                self.finished = bool(state.get("game_over"))
+                observations.append(
+                    self.tool_message(
+                        call_id, f"{result}\n{self.format_state(state)}"
+                    )
+                )
+                continue
+
             if name == "simulate_move":
                 # Simulation never touches the live board, so it neither
                 # updates `last_state` nor counts against the one-move limit.

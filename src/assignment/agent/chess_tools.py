@@ -15,6 +15,12 @@ import httpx
 
 CHESS_PORT = 8000
 
+# A model-written snippet runs unattended in the sandbox, and a 2-ply search
+# over an open position is already hundreds of HTTP calls. Without a ceiling a
+# runaway loop blocks the whole agent forever, since `Environment.execute`
+# waits indefinitely by default.
+RUN_PYTHON_TIMEOUT_SECONDS = 120
+
 
 def _request_state(
     client: httpx.Client, method: str, endpoint: str, **kwargs: Any
@@ -211,6 +217,7 @@ def _run_python(env: Any, port: int, arguments: str) -> str:
         result = env.execute(
             ["python", "/opt/assignment/sandbox_python.py", str(port), encoded],
             shell=False,
+            timeout=RUN_PYTHON_TIMEOUT_SECONDS,
         )
     except Exception as exc:
         return (
@@ -227,6 +234,16 @@ def _run_python(env: Any, port: int, arguments: str) -> str:
             or result.get("output")
             or "no output"
         )
+        # A timeout comes back as returncode -1 with the reason in
+        # `exception_info`. Say what to do about it: the model cannot see the
+        # ceiling it just hit, and will otherwise resend the same snippet.
+        if "timeout" in str(detail).lower() or "timed out" in str(detail).lower():
+            return (
+                f"<chess_error>The snippet did not finish within "
+                f"{RUN_PYTHON_TIMEOUT_SECONDS} seconds and was stopped. Nothing "
+                "it did was applied. Search fewer candidates or fewer plies, "
+                "and avoid unbounded loops.</chess_error>"
+            )
         return (
             f"<chess_error>The sandbox runner failed "
             f"(exit {result.get('returncode')}): {detail}</chess_error>"
@@ -241,7 +258,39 @@ def _invoke_skill(skills: dict[str, dict[str, str]], arguments: str) -> str:
     # TODO(3.5): parse the arguments and return the named skill's content.
     # Return <chess_error>{message}</chess_error> if there are issues like type
     # mismatches or parsing failures.
-    raise NotImplementedError
+    try:
+        parsed = json.loads(arguments)
+    except (json.JSONDecodeError, TypeError) as exc:
+        return (
+            f"<chess_error>Could not parse the arguments to `invoke_skill` as "
+            f"JSON: {exc}. Send them again as a valid JSON object."
+            "</chess_error>"
+        )
+
+    if not isinstance(parsed, dict):
+        return (
+            f"<chess_error>The arguments to `invoke_skill` must be a JSON "
+            f"object, got {type(parsed).__name__}.</chess_error>"
+        )
+
+    name = parsed.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return (
+            "<chess_error>`invoke_skill` requires a `name` string naming the "
+            "skill to load.</chess_error>"
+        )
+
+    skill = (skills or {}).get(name.strip())
+    if skill is None:
+        available = ", ".join(sorted(skills or {})) or "none"
+        return (
+            f"<chess_error>Unknown skill {name!r}. Available skills: "
+            f"{available}.</chess_error>"
+        )
+
+    # The catalog in the prompt carries only each skill's one-line summary;
+    # this is the half that was withheld until the model asked for it.
+    return skill["content"]
 
 
 def _game_state(client: httpx.Client, reset: bool = False) -> dict:

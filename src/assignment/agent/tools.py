@@ -144,7 +144,13 @@ PLAY_MOVE_TOOL: dict = {
             "This changes the real game. Call it once per turn, with the move "
             "you have decided on. An illegal move, a move out of turn, or a "
             "move in a finished game is reported back to you and costs the "
-            "turn nothing, but the board is otherwise committed."
+            "turn nothing, but the board is otherwise committed.\n"
+            "\n"
+            "If you chose the move by searching inside `run_python`, commit it "
+            "there instead: `play_move(best)` as the snippet's last statement "
+            "is this same tool, applied to the same board. Printing the move "
+            "and then calling this tool separately re-decides it without the "
+            "search in front of you, and is not how a move should be played."
         ),
         "strict": True,
         "parameters": {
@@ -233,9 +239,18 @@ RUN_PYTHON_TOOL: dict = {
             "\n"
             "Use this to search properly: loop over candidate moves, score "
             "them with `simulate_move`, and pick the best. Only what you "
-            "`print()` comes back, so print the result you need to see. "
-            "Calling `play_move` here commits that move to the real game, "
-            "exactly as the `play_move` tool would."
+            "`print()` comes back, so print the result you need to see.\n"
+            "\n"
+            "End the snippet by playing what you chose: `play_move(best)` as "
+            "the last statement. That call IS the `play_move` tool -- same "
+            "board, same commit, same returned position -- so a snippet that "
+            "ends there has played the move for this turn and needs no "
+            "separate tool call. A snippet that only prints its answer has "
+            "changed nothing and wasted the search.\n"
+            "\n"
+            "The snippet is stopped if it runs too long, so keep the search "
+            "bounded: a fixed list of candidates, a fixed depth, no unbounded "
+            "loops."
         ),
         "strict": True,
         "parameters": {
