@@ -81,7 +81,21 @@ cannot show was needed is a guess.
 3. Make the smallest change that addresses the root cause. Do not paper over \
 the symptom, and do not rewrite unrelated code.
 4. Re-run your reproduction to confirm it now passes, then run the repository's \
-own tests to confirm you broke nothing else.
+own tests to confirm you broke nothing else."""
+
+        # The closing instruction has to name whichever finishing path actually
+        # exists. Naming `send_message` unconditionally competes with a skill
+        # that owns submission, and the agent then verifies its fix and stops
+        # without ever submitting it.
+        if self.skills:
+            self.system_prompt += """
+
+When you believe the work is done, do not finish on your own. One of the \
+skills below covers how to submit; invoke it and follow its steps exactly, in \
+the order it gives them, and let it tell you when to call `send_message`. Do \
+not invoke it before the fix is verified."""
+        else:
+            self.system_prompt += """
 
 When the work is done, call `send_message` with a short summary of what was \
 wrong and what you changed. Do not call it before the fix is verified."""

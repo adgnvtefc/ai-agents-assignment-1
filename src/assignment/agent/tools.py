@@ -133,10 +133,87 @@ INVOKE_SKILL_TOOL = {
 # TODO(3.1.a): Define an OpenAI function-tool schema named ``play_move``.
 # It must accept exactly one required string argument named ``move``, explain
 # that moves use UCI notation (for example e2e4), and reject extra arguments.
-PLAY_MOVE_TOOL: dict = {}
+PLAY_MOVE_TOOL: dict = {
+    "type": "function",
+    "function": {
+        "name": "play_move",
+        "description": (
+            "Play one move as White on the live board and return the position "
+            "that results, with the opponent's reply already made.\n"
+            "\n"
+            "This changes the real game. Call it once per turn, with the move "
+            "you have decided on. An illegal move, a move out of turn, or a "
+            "move in a finished game is reported back to you and costs the "
+            "turn nothing, but the board is otherwise committed."
+        ),
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "move": {
+                    "type": "string",
+                    "description": (
+                        "The move in UCI notation: the square moved from "
+                        "followed by the square moved to, for example `e2e4` "
+                        "or `g1f3`. Promotions add the piece letter, as in "
+                        "`e7e8q`."
+                    ),
+                },
+            },
+            "required": ["move"],
+            "additionalProperties": False,
+        },
+    },
+}
 
 # TODO(3.3): Define the `simulate_move` tool, like the `play_move` tool.
-SIMULATE_MOVE_TOOL: dict = {}
+SIMULATE_MOVE_TOOL: dict = {
+    "type": "function",
+    "function": {
+        "name": "simulate_move",
+        "description": (
+            "Search without committing. Returns a position and its legal "
+            "moves, leaving the real game untouched.\n"
+            "\n"
+            "With a FEN alone, describes that position. With a FEN and a move, "
+            "plays exactly that one ply — for either colour — and describes "
+            "the position after it. No opponent reply is made.\n"
+            "\n"
+            "Chain it to look ahead: feed the `fen` it returns back in to go "
+            "another ply deeper, as many times as you like. Use this for every "
+            "candidate you are weighing, then `play_move` once for the move "
+            "you chose."
+        ),
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "fen": {
+                    "type": "string",
+                    "description": (
+                        "The position to inspect, as a complete six-field FEN "
+                        "(placement, side to move, castling, en passant, "
+                        "halfmove clock, fullmove number). Take it from the "
+                        "`fen` of an observation or of an earlier simulation."
+                    ),
+                },
+                "move": {
+                    # Strict mode requires every property in `required`, so an
+                    # optional argument is expressed as a nullable one: the
+                    # model passes null to inspect the position as it stands.
+                    "type": ["string", "null"],
+                    "description": (
+                        "Optional. One move in UCI notation, for example "
+                        "`e2e4` or `e7e8q`, to play from that position. Pass "
+                        "null to inspect the position without moving."
+                    ),
+                },
+            },
+            "required": ["fen", "move"],
+            "additionalProperties": False,
+        },
+    },
+}
 
 # TODO()
 RUN_PYTHON_TOOL: dict = {}

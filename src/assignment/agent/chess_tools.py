@@ -52,7 +52,57 @@ def _simulate_move(client: httpx.Client, arguments: str) -> str:
     # JSON arguments, arguments that are not an object, a missing or
     # non-string fen, a non-string move, a position or move the server rejects,
     # and a transport failure.
-    raise NotImplementedError
+    try:
+        parsed = json.loads(arguments)
+    except (json.JSONDecodeError, TypeError) as exc:
+        return (
+            f"<chess_error>Could not parse the arguments to `simulate_move` as "
+            f"JSON: {exc}. Send them again as a valid JSON object."
+            "</chess_error>"
+        )
+
+    if not isinstance(parsed, dict):
+        return (
+            f"<chess_error>The arguments to `simulate_move` must be a JSON "
+            f"object, got {type(parsed).__name__}.</chess_error>"
+        )
+
+    fen = parsed.get("fen")
+    if not isinstance(fen, str) or not fen.strip():
+        return (
+            "<chess_error>`simulate_move` requires a `fen` string: a complete "
+            "six-field FEN describing the position to inspect.</chess_error>"
+        )
+
+    move = parsed.get("move")
+    if move is not None and not isinstance(move, str):
+        return (
+            f"<chess_error>`move` must be a string in UCI notation or null, "
+            f"got {type(move).__name__}.</chess_error>"
+        )
+
+    payload: dict[str, Any] = {"fen": fen.strip()}
+    # The server's request model forbids unknown keys and takes `move` as
+    # optional, so an omitted move is left out rather than sent as empty.
+    if isinstance(move, str) and move.strip():
+        payload["move"] = move.strip()
+
+    try:
+        # The server owns the rules here too: it rejects a malformed or
+        # impossible FEN, an illegal move, and a move in a terminal position,
+        # each as a 400 that `_request_state` re-raises as a ValueError.
+        state = _request_state(client, "POST", "/api/simulate", json=payload)
+    except ValueError as exc:
+        return f"<chess_error>{exc}</chess_error>"
+    except RuntimeError as exc:
+        return f"<chess_error>{exc}</chess_error>"
+    except httpx.HTTPError as exc:
+        return (
+            f"<chess_error>Could not reach the chess server "
+            f"({type(exc).__name__}: {exc}).</chess_error>"
+        )
+
+    return json.dumps(state)
 
 
 def _play_move(client: httpx.Client, arguments: str) -> str:
@@ -67,7 +117,44 @@ def _play_move(client: httpx.Client, arguments: str) -> str:
     # for the agent to address. Cover malformed JSON arguments, arguments
     # that are not an object, a missing or non-string fen, a non-string move,
     # a position or move the server rejects, and a transport failure.
-    raise NotImplementedError
+    try:
+        parsed = json.loads(arguments)
+    except (json.JSONDecodeError, TypeError) as exc:
+        return (
+            f"<chess_error>Could not parse the arguments to `play_move` as "
+            f"JSON: {exc}. Send them again as a valid JSON object."
+            "</chess_error>"
+        )
+
+    if not isinstance(parsed, dict):
+        return (
+            f"<chess_error>The arguments to `play_move` must be a JSON object, "
+            f"got {type(parsed).__name__}.</chess_error>"
+        )
+
+    move = parsed.get("move")
+    if not isinstance(move, str) or not move.strip():
+        return (
+            "<chess_error>`play_move` requires a `move` string in UCI "
+            "notation, for example e2e4.</chess_error>"
+        )
+
+    try:
+        # The server owns the rules: it rejects an illegal move, a move out of
+        # turn, and a move in a finished game, each as a 400 that
+        # `_request_state` re-raises as a ValueError carrying its detail.
+        state = _request_state(client, "POST", "/api/move", json={"move": move.strip()})
+    except ValueError as exc:
+        return f"<chess_error>{exc}</chess_error>"
+    except RuntimeError as exc:
+        return f"<chess_error>{exc}</chess_error>"
+    except httpx.HTTPError as exc:
+        return (
+            f"<chess_error>Could not reach the chess server "
+            f"({type(exc).__name__}: {exc}).</chess_error>"
+        )
+
+    return json.dumps(state)
 
 
 def _run_python(env: Any, port: int, arguments: str) -> str:

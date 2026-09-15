@@ -107,8 +107,10 @@ class ChessAgent(Agent):
         )
 
         # TODO(Part 3): Register the play_move tool schema from tools.py.
+        self.tools.append(PLAY_MOVE_TOOL)
 
         if programmatic_tools:
+            self.tools.append(SIMULATE_MOVE_TOOL)
             self.tools.append(RUN_PYTHON_TOOL)
 
         # run_python always executes in the sandbox, on the port the chess
@@ -177,4 +179,74 @@ class ChessAgent(Agent):
 
         # TODO(Part 3.3-4): add cases for simulate_move and run_python, with
         # linked observations and recoverable errors, just like the old tool.
-        raise NotImplementedError
+        observations: list[dict[str, str]] = []
+        # `play_move` commits to the live board, so only the first one in a
+        # response can run: a second would be played from a position that has
+        # already moved on, including the opponent's reply.
+        move_played = False
+
+        for call in tool_calls:
+            call_id = call.get("id", "")
+            function = call.get("function") or {}
+            name = function.get("name")
+
+            if name not in self.registered_tool_names:
+                available = ", ".join(f"`{t}`" for t in self.registered_tool_names)
+                observations.append(
+                    self.tool_message(
+                        call_id,
+                        f"<chess_error>Unknown tool: {name!r}. "
+                        f"Available tools: {available}.</chess_error>",
+                    )
+                )
+                continue
+
+            if name == "simulate_move":
+                # Simulation never touches the live board, so it neither
+                # updates `last_state` nor counts against the one-move limit.
+                observations.append(
+                    self.tool_message(
+                        call_id,
+                        _simulate_move(
+                            self.chess_client, function.get("arguments") or ""
+                        ),
+                    )
+                )
+                continue
+
+            if move_played:
+                observations.append(
+                    self.tool_message(
+                        call_id,
+                        "<chess_error>Only one `play_move` call per turn. This "
+                        "call was not played; read the position returned by "
+                        "the first move and choose again from there."
+                        "</chess_error>",
+                    )
+                )
+                continue
+
+            result = _play_move(self.chess_client, function.get("arguments") or "")
+            if result.startswith("<chess_error>"):
+                observations.append(self.tool_message(call_id, result))
+                continue
+
+            state = json.loads(result)
+            self.last_state = state
+            self.finished = bool(state.get("game_over"))
+            move_played = True
+            observations.append(self.tool_message(call_id, self.format_state(state)))
+
+        return observations
+
+    @property
+    def registered_tool_names(self) -> list[str]:
+        """The tool names this agent actually offered the model."""
+
+        return [tool["function"]["name"] for tool in self.tools]
+
+    @staticmethod
+    def tool_message(call_id: str, content: str) -> dict[str, str]:
+        """Build the observation message that answers one tool call."""
+
+        return {"role": "tool", "tool_call_id": call_id, "content": content}

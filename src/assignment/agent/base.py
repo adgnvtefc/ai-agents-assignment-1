@@ -40,7 +40,28 @@ SKILL_FRONTMATTER_PATTERN = re.compile(
 # TODO(Part 2): Write instructions that make the model produce concise working
 # memory for a software agent. The prompt should preserve concrete progress,
 # failures, test results, constraints, and next steps without copying raw output.
-COMPACTION_SYSTEM_PROMPT = ""
+COMPACTION_SYSTEM_PROMPT = """\
+You are compacting the working memory of a software engineering agent. You are \
+given the agent's objective and the older part of its transcript. The recent \
+steps are kept verbatim and are not shown to you.
+
+Write the notes the agent needs to keep working as if it remembered this \
+stretch. Address the agent, and write plain prose under short headings, not a \
+narration of the transcript.
+
+Preserve, when the transcript establishes them:
+- The objective, and any constraint or instruction it must still obey.
+- Files read or changed, by path, and what each change was.
+- Commands run that produced a decisive result, and the result itself: tests \
+passing or failing with counts and names, error types and messages, exit codes.
+- Approaches already tried that did not work, and why, so they are not retried.
+- What is verified versus assumed, anything still blocking, and the next action.
+
+Do not copy raw output: no file contents, no directory listings, no full \
+tracebacks or logs. Reduce them to the fact they established. A command whose \
+result changed nothing is not worth a line. Never invent a result the \
+transcript does not show, and never claim work is finished unless it says so.\
+"""
 
 
 class StepLimitError(Exception):
@@ -65,6 +86,33 @@ def format_tool_output(output: dict[str, Any]) -> str:
             )
         elements.append(f"<{key}>{value}</{key}>")
     return "\n".join(elements)
+
+
+def render_transcript(messages: list[dict[str, Any]]) -> str:
+    """Flatten messages into plain text for the summarizer.
+
+    Actions and their results become labelled lines, so the summarizer is never
+    handed a `tool_call_id` it would be expected to answer.
+    """
+
+    lines: list[str] = []
+    for message in messages:
+        role = message.get("role", "unknown")
+        content = message.get("content") or ""
+        if role == "assistant":
+            if content:
+                lines.append(f"[assistant] {content}")
+            for call in message.get("tool_calls") or []:
+                function = call.get("function") or {}
+                lines.append(
+                    f"[action {call.get('id', '')}] "
+                    f"{function.get('name', 'unknown')} {function.get('arguments', '')}"
+                )
+        elif role == "tool":
+            lines.append(f"[result of {message.get('tool_call_id', '')}]\n{content}")
+        else:
+            lines.append(f"[{role}] {content}")
+    return "\n".join(lines)
 
 
 def rough_message_tokens(messages: list[dict[str, Any]]) -> int:
@@ -375,9 +423,34 @@ class Agent:
         # with all linked tool observations. The resulting summary should change
         # what `build_prompt` emits, and reduce the length of the prompt.
 
-        raise NotImplementedError
+        # An assistant message and the tool messages answering it are one
+        # action. Splitting between them would orphan a `tool_call_id` and the
+        # provider would reject the next request, so the cut always lands on an
+        # assistant message: keep the last `compaction_keep_recent_steps` of
+        # them plus everything that follows, and summarize the prefix.
+        actions = [
+            index
+            for index, message in enumerate(self.working_memory)
+            if message.get("role") == "assistant"
+        ]
+        keep = self.compaction_keep_recent_steps
+        split = actions[-keep] if len(actions) > keep else 0
+        older, recent = self.working_memory[:split], self.working_memory[split:]
 
-        compaction_prompt = []
+        # The system and task messages are not in `working_memory`; they are
+        # re-rendered by `build_prompt` and so survive compaction untouched.
+        # The objective still goes to the summarizer, which cannot judge what
+        # matters without it.
+        compaction_prompt = [
+            {"role": "system", "content": COMPACTION_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"<objective>\n{self.task_prompt}\n</objective>\n\n"
+                    f"<transcript>\n{render_transcript(older)}\n</transcript>"
+                ),
+            },
+        ]
 
         ### Do not modify this section ###
         compaction_response = self.client.chat.completions.create(
@@ -386,6 +459,20 @@ class Agent:
             reasoning_effort="medium",
             max_completion_tokens=self.compaction_max_tokens,
         )
+
+        # An empty summary would erase the prefix and replace it with nothing,
+        # so keep the raw context rather than lose it.
+        summary = (compaction_response.choices[0].message.content or "").strip()
+        if summary:
+            self.working_memory = [
+                {
+                    "role": "user",
+                    "content": f"<working_memory>\n{summary}\n</working_memory>",
+                },
+                *recent,
+            ]
+        else:
+            logger.warning("Compaction returned an empty summary; context kept.")
 
         return compaction_prompt, compaction_response.model_dump(mode="json")
         ##################################
@@ -442,6 +529,11 @@ class Agent:
             # and handles the threshold, and tracks compaction events for
             # logging.
             while not self.finished and self.steps_taken < self.step_limit:
+                # Compact before the request, never after: the threshold is
+                # about the prompt we are about to send, and shrinking it
+                # afterwards would still have paid for the oversized one.
+                self.maybe_compact_context()
+
                 response = self.query_language_model()
                 self.working_memory.append(response)
 
