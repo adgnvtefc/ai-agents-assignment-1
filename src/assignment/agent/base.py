@@ -5,7 +5,6 @@ supply only their own tools and tool executors.
 """
 
 from __future__ import annotations
-from assignment import prompts
 
 from copy import deepcopy
 import json
@@ -477,9 +476,15 @@ class Agent:
             reasoning_effort="medium",
             max_completion_tokens=self.compaction_max_tokens,
         )
+        ##################################
 
-        # An empty summary would erase the prefix and replace it with nothing,
-        # so keep the raw context rather than lose it.
+        # Use `compaction_response` to update what `build_prompt` emits, but
+        # DO NOT modify the object itself. Let the method return it unchanged.
+        #
+        # Read only: the summary is taken from the response, and the prefix it
+        # replaces is dropped from `working_memory`. An empty summary would
+        # erase that prefix and put nothing in its place, so keep the raw
+        # context rather than lose it.
         summary = (compaction_response.choices[0].message.content or "").strip()
         if summary:
             self.working_memory = [
@@ -492,6 +497,7 @@ class Agent:
         else:
             logger.warning("Compaction returned an empty summary; context kept.")
 
+        ### Do not modify this section ###
         return compaction_prompt, compaction_response.model_dump(mode="json")
         ##################################
 
