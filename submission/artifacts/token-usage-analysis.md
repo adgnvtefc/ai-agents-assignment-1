@@ -67,8 +67,12 @@ context is also lossy by construction — early exploration survives only as the
 summary's claims, so any detail the summariser omitted is unrecoverable.
 
 What it buys: a ceiling. Peak prompt fell 62%, and per-step cost fell 54%. The
-correctness of the result did not suffer: the compacted run produced the same
-canonical fix and passed `check-swebench` with `RESOLVED: yes`.
+correctness of the result did not suffer: both patches were replayed through
+`check-swebench` and both returned `RESOLVED: yes`, passing 1/1 FAIL_TO_PASS and
+29/29 PASS_TO_PASS. The two runs arrived at the same canonical fix — replacing
+the `isinstance(attr, Expression)` check with `hasattr(attr, "resolve_expression")`
+and dropping the now-unused import — differing only in quote style. Compaction
+cost nothing in solution quality on this instance.
 
 On this instance the baseline never approached a context limit, so compaction
 reads as a modest token saving bought with more wall-clock. The case for it is
@@ -95,5 +99,4 @@ One run per condition. Step counts vary substantially between runs of the same
 configuration, so the 30-vs-47 difference is not attributable to compaction on
 this evidence. The per-step and peak figures are structural consequences of the
 mechanism and are the defensible comparisons; the totals depend on run length and
-should be read alongside it. Only the compacted patch was replayed through
-`check-swebench`, so the baseline's resolution status is unverified.
+should be read alongside it.
